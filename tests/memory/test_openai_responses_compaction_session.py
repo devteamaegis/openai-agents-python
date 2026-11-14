@@ -711,6 +711,50 @@ class TestOpenAIResponsesCompactionSession:
         mock_session.get_items.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streamed", [False, True])
+    async def test_underlying_session_limit_drops_output_whose_call_is_outside_window(
+        self, streamed: bool
+    ) -> None:
+        backend = SQLiteSession("window", session_settings=SessionSettings(limit=2))
+        await backend.add_items(
+            [
+                {"role": "user", "content": "weather?"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "weather",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
+                {"role": "assistant", "content": "It is sunny."},
+            ]
+        )
+        client = MagicMock()
+        client.responses.compact = AsyncMock()
+        session = OpenAIResponsesCompactionSession(
+            "window", backend, client=client, should_trigger_compaction=lambda ctx: False
+        )
+        model = ScriptedModel()
+        model.enqueue([get_text_message("ok")])
+        agent = Agent(name="test", model=model)
+        try:
+            if streamed:
+                result = Runner.run_streamed(agent, "tomorrow?", session=session)
+                async for _ in result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, "tomorrow?", session=session)
+
+            # The wrapped store returns its last two items, which cut call_1 from its output.
+            assert model.calls[-1].input == [
+                {"role": "assistant", "content": "It is sunny."},
+                {"role": "user", "content": "tomorrow?"},
+            ]
+            client.responses.compact.assert_not_awaited()
+        finally:
+            backend.close()
+
+    @pytest.mark.asyncio
     async def test_run_compaction_requires_response_id(self) -> None:
         mock_session = self.create_mock_session()
         session = OpenAIResponsesCompactionSession(

@@ -454,6 +454,17 @@ async def prepare_input_with_session(
     if session_settings is not None:
         resolved_settings = resolved_settings.resolve(session_settings)
 
+    # OpenAIResponsesCompactionSession does not expose the wrapped store's settings, but the
+    # store still applies its own default limit when the wrapper reads it. Treat that history
+    # as windowed too, so a call/output pair split by the window is cleaned up below.
+    history_window_limit = resolved_settings.limit
+    if history_window_limit is None:
+        underlying_settings = getattr(
+            getattr(session, "underlying_session", None), "session_settings", None
+        )
+        if underlying_settings is not None:
+            history_window_limit = underlying_settings.limit
+
     if resolved_settings.limit is not None:
         history = await _session_get_items(
             session,
@@ -495,9 +506,9 @@ async def prepare_input_with_session(
         appended_items = list(new_input_list)
         if include_history_in_prepared_input:
             prune_history_indexes = set(range(len(converted_history)))
-            if session_input_callback is None and resolved_settings.limit is not None:
+            if session_input_callback is None and history_window_limit is not None:
                 output_pruning_indexes = set(prune_history_indexes)
-                if len(converted_history) == resolved_settings.limit:
+                if len(converted_history) == history_window_limit:
                     _omit_boundary_assistant_message_ids(converted_history)
     else:
         if not callable(session_input_callback):
